@@ -9,8 +9,6 @@ import {
   User as UserIcon,
   AlertTriangle,
   Check,
-  Plus,
-  Minus,
   TrendingUp,
   CreditCard,
   History,
