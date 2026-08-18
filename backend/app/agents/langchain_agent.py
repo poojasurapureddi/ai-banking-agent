@@ -35,6 +35,14 @@ def _parse_transfer_amount(clean_msg: str) -> Optional[float]:
         return None
     return float(amt_match.group(1))
 
+def _parse_deposit_amount(clean_msg: str) -> Optional[float]:
+    if "deposit" not in clean_msg:
+        return None
+    amt_match = re.search(r"(\d+(?:\.\d{1,2})?)", clean_msg)
+    if not amt_match:
+        return None
+    return float(amt_match.group(1))
+
 def _parse_withdraw_amount(clean_msg: str) -> Optional[float]:
     if "withdraw" not in clean_msg:
         return None
@@ -111,7 +119,30 @@ def run_banking_agent(
             "status": "success"
         }
 
-     # Withdrawal intent — executes immediately if sufficient balance exists;
+    # Deposit intent — executes immediately since deposits carry no fraud risk
+    # (money only ever enters the user's own account, never leaves it).
+    deposit_amount = _parse_deposit_amount(clean_msg)
+    if deposit_amount is not None and deposit_amount > 0:
+        MAX_DEPOSIT = 1_000_000  # sanity ceiling; large legitimate deposits should go through a human-verified channel
+        if deposit_amount > MAX_DEPOSIT:
+            return {
+                "response": f"Deposits are limited to ₹{MAX_DEPOSIT:,.2f} per request through the assistant. "
+                            f"For larger deposits, please contact your branch or use a verified deposit channel.",
+                "status": "error"
+            }
+
+        accounts = db.query(Account).filter(Account.user_id == user.id).all()
+        if not accounts:
+            return {"response": "You don't have any accounts active.", "status": "error"}
+        dest_account = next((a for a in accounts if a.id == default_account_id), accounts[0])
+
+        result = tools_map["initiate_deposit"].invoke({
+            "account_id": dest_account.id,
+            "amount": deposit_amount
+        })
+        return format_agent_response(result)
+
+    # Withdrawal intent — executes immediately if sufficient balance exists;
     # the service layer enforces the balance check server-side.
     withdraw_amount = _parse_withdraw_amount(clean_msg)
     if withdraw_amount is not None and withdraw_amount > 0:
@@ -181,7 +212,7 @@ def run_banking_agent(
         }
 
     # ------------------------------------------------------------------
-    # No transfer intent detected — delegate to LLM or rule-based mock agent.
+    # No transfer/deposit/withdraw intent detected — delegate to LLM or rule-based mock agent.
     # ------------------------------------------------------------------
     llm = None
     if LANGCHAIN_AVAILABLE:
@@ -220,9 +251,10 @@ def run_langchain_agent_loop(
         "initiate transfers, check transfer-specific risk, view the user's recent risk profile, "
         "and look up transaction statuses. Always use get_account_details to list accounts "
         "and get_risk_profile for general 'what is my risk score' questions.\n"
-        "Note: transfer requests, deposit requests, and their confirmation/cancellation are already "
-        "intercepted and handled before you see them, so if such a message reaches you, treat it as an "
-        "unusual edge case and answer conversationally without attempting to execute one yourself.\n"
+        "Note: transfer requests, deposit requests, withdrawal requests, and their confirmation/"
+        "cancellation are already intercepted and handled before you see them, so if such a message "
+        "reaches you, treat it as an unusual edge case and answer conversationally without attempting "
+        "to execute one yourself.\n"
         "CRITICAL SECURITY RULES:\n"
         "1. NEVER make up account balances, transactions, or statuses. You MUST query the appropriate tools.\n"
         "2. If a transfer tool returns 'CONFIRMATION_REQUIRED', you must present this warning to the user exactly as returned. Do not bypass it.\n"
@@ -285,8 +317,9 @@ def run_mock_agent(
     default_account_id: Optional[int]
 ) -> Dict[str, Any]:
     """
-    Fallback agent for non-transfer, non-deposit queries (both are intercepted
-    upstream in run_banking_agent before this function is ever called).
+    Fallback agent for non-transfer, non-deposit, non-withdrawal queries
+    (all three are intercepted upstream in run_banking_agent before this
+    function is ever called).
     """
     clean_msg = message.lower().strip()
 
