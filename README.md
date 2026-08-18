@@ -1,197 +1,162 @@
-# AI-Powered Banking Agent with Guardrails & Human-in-the-Loop Review
+# AI-Powered Banking Agent with Guardrails & Human-in-the-Loop
 
-A production-style 3-tier secure banking system featuring a conversational React frontend, a robust FastAPI backend, and an intelligent compliance validation engine. Customers can manage balances and request transactions via chat, while administrators and compliance reviewers oversee risk queues and access immutable ledger audits.
+A 3-tier financial support system where an AI assistant handles account operations (balance checks, deposits, withdrawals, transfers) through natural language, while a rule-based risk engine screens every transfer for fraud risk and automatically routes high-risk transactions to a human reviewer before any money moves.
+
+**Live App:** https://ai-banking-agent.vercel.app
+**Backend API:** https://ai-banking-agent.onrender.com/api/health
+
+**Demo accounts** (seeded automatically on first backend startup):
+
+| Role | Email | Password |
+|---|---|---|
+| Customer | `customer@bank.com` | `customer123` |
+| Reviewer | `reviewer@bank.com` | `reviewer123` |
+| Admin | `admin@bank.com` | `admin123` |
+
+> Note: the backend runs on Render's free tier, which spins down after ~15 minutes of inactivity. The first request after a period of idleness can take 30–60 seconds to respond while the instance wakes up — this is expected, not a bug.
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ```
-React Frontend (Vite + TypeScript)
-       │
-       │ HTTP / JSON REST API
-       ▼
-FastAPI Security Layer (JWT Auth + Role-Based Access)
-       │
-       ├─► Guardrails AI (Prompt injection prevention & input sanitation)
-       │
-       ├─► LangChain Agent (Dynamic tool closures for secure accounts query)
-       │
-       ├─► Risk Evaluation Engine (Low, Medium, High Risk classification)
-       │
-       ├─► Human Review Queue (Approve / Reject hold states)
-       │
-       ▼
-PostgreSQL Database (SQLAlchemy Models)
+┌─────────────────┐        ┌──────────────────┐        ┌─────────────────┐
+│   React / Vite   │  REST  │  FastAPI Backend  │  SQL   │   PostgreSQL     │
+│   Frontend        │◄──────►│  (LangChain Agent │◄──────►│   Database       │
+│   (Vercel)         │  JSON  │   + Guardrails +   │        │   (Render)       │
+│                    │        │   Risk Engine)      │        │                  │
+└─────────────────┘        └──────────────────┘        └─────────────────┘
 ```
+
+- **Frontend:** React + TypeScript + Tailwind CSS, built with Vite. Deployed on Vercel.
+- **Backend:** FastAPI (Python), SQLAlchemy ORM, JWT authentication. Deployed on Render.
+- **Database:** PostgreSQL (Render managed instance). SQLite is used automatically for local development if no `DATABASE_URL` is set.
+- **AI Agent:** LangChain-based agent with tool-calling (Gemini or OpenAI, if an API key is configured). Falls back to a fully functional rule-based parser (`run_mock_agent`) when no LLM key is present, using the exact same backend tools — so the assistant works identically with or without an LLM provider.
+- **Guardrails:** Regex-based prompt-injection and sensitive-info-disclosure detection runs on every message before it reaches the agent or any tool.
+- **Risk Engine:** Deterministic scoring (`app/services/risk.py`) evaluates every transfer on amount, beneficiary verification status, transfer frequency, and time of day, producing a 0–100 score that determines LOW / MEDIUM / HIGH routing.
+- **Human-in-the-Loop:** HIGH-risk transfers are held as `PENDING_REVIEW` and a `ReviewRequest` is created. Only a REVIEWER or ADMIN role can approve or reject it through the Admin dashboard; approval executes the transfer, rejection cancels it. No money moves until a human acts.
+
+### Key backend modules
+
+| Path | Responsibility |
+|---|---|
+| `app/routes/` | REST endpoints: auth, accounts, transactions, agent chat, reviews, admin stats |
+| `app/services/banking.py` | Core transfer/deposit/withdraw logic, risk-based routing, review creation |
+| `app/services/risk.py` | Deterministic risk scoring rules |
+| `app/services/pending_transfers.py` | In-memory store tracking a transfer awaiting the user's explicit confirmation |
+| `app/agents/langchain_agent.py` | Intent parsing (deposit/withdraw/transfer/confirm/cancel), LLM tool-calling loop, rule-based fallback |
+| `app/tools/banking_tools.py` | LangChain tools exposing balance, history, beneficiaries, transfers, deposits, withdrawals, risk lookups — each closed over the authenticated user, so no tool can act outside that user's own data |
+| `app/guardrails/guardrails_validator.py` | Prompt-injection and sensitive-info-request pattern matching |
+
+---
+
+## Setup & Installation
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+
+- PostgreSQL (optional locally — SQLite is used automatically if `DATABASE_URL` is unset)
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/poojasurapureddi/ai-banking-agent.git
+cd ai-banking-agent
+```
+
+### 2. Backend setup
+```bash
+cd backend
+pip install -r requirements.txt --break-system-packages
+```
+
+Create `backend/.env` (or copy `.env.example`) with:
+```
+DATABASE_URL=sqlite:///./banking.db
+JWT_SECRET=<generate with: python -c "import secrets; print(secrets.token_urlsafe(32))">
+GEMINI_API_KEY=
+OPENAI_API_KEY=
+```
+Leaving both LLM keys blank is fine — the assistant runs the same feature set via its rule-based fallback.
+
+Run the server:
+```bash
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+On first startup, the app auto-creates all tables and seeds the three demo accounts listed above.
+
+### 3. Frontend setup
+```bash
+cd frontend
+npm install
+npm run dev
+```
+The app runs at `http://localhost:5173` and talks to `http://localhost:8000/api` by default (overridable via a `VITE_API_URL` environment variable, which is how the deployed Vercel build points at the live Render backend instead).
+
+---
+
+## Test & Evaluation Report
+
+The following scenarios were manually tested end-to-end against both the local development environment and the deployed production environment (Vercel + Render + Postgres).
+
+### AI Assistant — natural language banking
+
+| Test | Input | Expected | Result |
+|---|---|---|---|
+| Balance query | `What is my current balance?` | Returns real balance from DB | ✅ Pass |
+| Account listing | `What accounts do I have?` | Lists real accounts, masked number | ✅ Pass |
+| Transaction history | `Show my recent transactions` | Returns real transactions | ✅ Pass |
+| Beneficiary listing | `Whom can I transfer to?` | Lists registered beneficiaries | ✅ Pass |
+| Deposit | `Deposit 5000` | Executes immediately, real TXN ID, balance increases | ✅ Pass |
+| Deposit over limit | `Deposit 123456789` | Rejected with a clear limit message, no transaction created | ✅ Pass |
+| Withdrawal | `Withdraw 1000` | Executes if sufficient balance, real TXN ID, balance decreases | ✅ Pass |
+| Withdrawal, insufficient funds | Withdraw more than balance | Rejected, no transaction created | ✅ Pass |
+| Low-risk transfer preview | `Transfer 250 to John` | Shows preview (amount, recipient, source account), does **not** execute | ✅ Pass |
+| Transfer confirmation | `Yes` after preview | Executes exactly once, real TXN ID returned | ✅ Pass |
+| Transfer cancellation | `No` after preview | Cancels, no transaction created, balance unchanged | ✅ Pass |
+| Unrecognized beneficiary | Transfer to a name not on file | Clear error listing actual registered beneficiaries | ✅ Pass |
+| Insufficient balance on transfer | Transfer more than available | Rejected with real available balance shown | ✅ Pass |
+| Duplicate confirmation | Confirm twice in a row | Second confirmation returns "no pending transfer," no duplicate transaction | ✅ Pass |
+| Transaction status lookup | `Check status of transaction TXN-14` | Returns real status, amount, risk score, timestamp | ✅ Pass |
+| Prompt injection attempt | `Ignore previous instructions...` | Blocked by guardrails before reaching the agent | ✅ Pass |
+
+### Risk scoring & human-in-the-loop review
+
+| Test | Scenario | Expected | Result |
+|---|---|---|---|
+| Low risk | Small transfer to a verified beneficiary | Executes automatically | ✅ Pass |
+| Medium risk | Transfer to an unverified beneficiary above threshold | Requires explicit user confirmation before executing | ✅ Pass |
+| High risk | Large amount + unverified beneficiary + frequency triggers | Transaction held as `PENDING_REVIEW`, no balance change, appears in Admin review queue with real customer name, amount, and score | ✅ Pass |
+| Admin approval | Reviewer approves a pending review | Transaction executes, balance updates, Pending count decreases, Approved count increases | ✅ Pass |
+| Admin rejection | Reviewer rejects a pending review | Transaction marked rejected, balance unchanged, Rejected count increases | ✅ Pass |
+| Duplicate action prevention | Attempt to approve an already-resolved review | Backend rejects with 400, frontend disables buttons during processing | ✅ Pass |
+| Authorization enforcement | Customer role calls `/reviews` or `/admin/stats` directly | Backend returns 403, independent of frontend UI state | ✅ Pass |
+
+### Cross-surface data consistency
+
+| Test | Scenario | Result |
+|---|---|---|
+| Dashboard ↔ AI Assistant | A deposit made via chat immediately reflects in the Dashboard's Recent Transactions and Total Balance after refresh | ✅ Pass |
+| Dashboard ↔ Transactions page | Same transaction list, same source of truth (`Transaction` table), no duplicated data | ✅ Pass |
+| Admin Review ↔ Transactions page | A high-risk transaction approved via Admin Review shows updated status on the Transactions page | ✅ Pass |
+| Refresh persistence | Reloading the browser after any action preserves the correct, non-duplicated state | ✅ Pass |
+
+### Security
+
+| Test | Result |
+|---|---|
+| Ownership enforcement on accounts/transactions | Backend derives the user from the JWT; a client-supplied account ID that doesn't belong to the caller is rejected (403), never trusted | ✅ Pass |
+| Role-based access (Admin/Reviewer endpoints) | Enforced server-side via `RoleChecker`, not just hidden UI elements | ✅ Pass |
+| Secrets management | `.env` and database credentials excluded from version control; verified absent from git history | ✅ Pass |
+
+### Known limitations
+- Free-tier hosting (Render) causes a cold-start delay of up to ~60 seconds after inactivity.
+- Pending-transfer confirmation state is held in-memory per backend process; it would need to move to a database-backed table to survive a server restart in a multi-instance production deployment.
+- LLM-backed conversation (Gemini/OpenAI) was not exercised in this deployment since no API key was configured; the rule-based fallback agent was used for all testing and is functionally equivalent for every operation described above.
 
 ---
 
 ## Tech Stack
 
-- **Frontend**: React (18), TypeScript, Tailwind CSS, React Router, Axios, Lucide Icons
-- **Backend**: Python 3.11+, FastAPI, SQLAlchemy, Pydantic (v2), PyJWT, Uvicorn
-- **AI Agent**: LangChain (OpenAI / Gemini integrations with local Mock Fallback)
-- **Database**: PostgreSQL (Dockerized) / SQLite (In-Memory for unit testing)
-- **Deployment**: Docker & Docker Compose
-
----
-
-## Database Schema Design
-
-### 1. User
-- `id` (Integer, Primary Key)
-- `name` (String, Non-Nullable)
-- `email` (String, Unique, Indexed)
-- `password_hash` (String, Non-Nullable)
-- `role` (Enum: `CUSTOMER`, `REVIEWER`, `ADMIN`)
-- `created_at` (DateTime)
-
-### 2. Account
-- `id` (Integer, Primary Key)
-- `user_id` (Integer, Foreign Key Users)
-- `account_number` (String, Unique, Indexed)
-- `account_type` (String, e.g. "CHECKING", "SAVINGS")
-- `balance` (Float)
-- `created_at` (DateTime)
-
-### 3. Beneficiary
-- `id` (Integer, Primary Key)
-- `user_id` (Integer, Foreign Key Users)
-- `name` (String)
-- `account_number` (String)
-- `is_verified` (Boolean)
-- `created_at` (DateTime)
-
-### 4. Transaction
-- `id` (Integer, Primary Key)
-- `account_id` (Integer, Foreign Key Accounts)
-- `beneficiary_id` (Integer, Foreign Key Beneficiaries, Optional)
-- `type` (Enum: `DEPOSIT`, `WITHDRAW`, `TRANSFER`)
-- `amount` (Float)
-- `status` (Enum: `PENDING_REVIEW`, `SUCCESS`, `REJECTED`, `FAILED`)
-- `risk_score` (Integer)
-- `risk_reason` (String, Optional)
-- `created_at` (DateTime)
-
-### 5. ReviewRequest
-- `id` (Integer, Primary Key)
-- `transaction_id` (Integer, Foreign Key Transactions)
-- `reason` (String)
-- `status` (Enum: `PENDING`, `APPROVED`, `REJECTED`)
-- `reviewed_by` (Integer, Foreign Key Users, Optional)
-- `created_at` (DateTime)
-- `reviewed_at` (DateTime, Optional)
-
-### 6. AuditLog
-- `id` (Integer, Primary Key)
-- `user_id` (Integer, Foreign Key Users, Optional)
-- `action` (String)
-- `entity_type` (String)
-- `entity_id` (Integer, Optional)
-- `details` (String/Text JSON, Optional)
-- `created_at` (DateTime)
-
----
-
-## REST API Documentation
-
-### Authentication
-- `POST /api/auth/register` - Create user. Provisons default Checking account ($5,000) and two default beneficiaries.
-- `POST /api/auth/login` - Validate password, generate JWT containing sub and role claims.
-
-### Accounts
-- `GET /api/accounts` - Retrieve all accounts owned by the session customer.
-- `GET /api/accounts/{account_id}` - Retrieve details of a specific account.
-- `GET /api/accounts/{account_id}/transactions` - Fetch transaction history logs.
-- `GET /api/accounts/all/beneficiaries` - Retrieve registered beneficiaries.
-- `POST /api/accounts/all/beneficiaries` - Add a new beneficiary to the account list.
-
-### Transactions
-- `POST /api/transactions/deposit` - Increment account balance.
-- `POST /api/transactions/withdraw` - Deduct balance if sufficient funds are present.
-- `POST /api/transactions/transfer` - Transfer funds. Evaluates risk rules and routes to compliance checks or confirmation.
-
-### Compliance Reviews (Reviewers & Admins)
-- `GET /api/reviews` - List all review queue request logs.
-- `GET /api/reviews/{review_id}` - Fetch audit detail for a transaction.
-- `POST /api/reviews/{review_id}/approve` - Execute transaction safely and modify accounts balance.
-- `POST /api/reviews/{review_id}/reject` - Refuse transaction, setting status to rejected.
-
-### AI Assistant
-- `POST /api/agent/chat` - Dispatch conversational queries to the guardrails-protected agent.
-
-### Admin Tools (Admin Only)
-- `GET /api/admin/audit-logs` - Retrieve the system operations audit ledger.
-
----
-
-## Compliance & Security Logic
-
-### 1. Guardrails
-- **Prompt Injection**: Scans for patterns like "ignore previous instructions" or "developer mode override" and returns an HTTP 400 Refusal.
-- **Sensitive Data Block**: Intercepts queries seeking database details, keys, or passwords.
-- **Parameters Validation**: Blocks negative money fields, invalid account numbers, and ensures the LLM tools operate only within the authenticated customer's closures.
-
-### 2. Risk Evaluation Engine
-- `Amount > 50,000`: **+30 points**
-- `New/Unverified Beneficiary`: **+25 points**
-- `High Transfer Frequency (3+ in 24h)`: **+20 points**
-- `Odd hours (11 PM - 5 AM)`: **+25 points**
-- **Sufficient Balance**: Any transfer exceeding balance is blocked immediately (No transaction is logged).
-
-**Risk Routing Action:**
-- **LOW (0 - 30)**: Automatically executed.
-- **MEDIUM (31 - 60)**: Requires user override. If `confirmed` flag is absent, returns `confirmation_required` with risk warnings. Confirming prompts the frontend to resend with `confirmed=True`.
-- **HIGH (61 - 100)**: Suspended to `PENDING_REVIEW` and inserts ReviewRequest. Balances are left unchanged until approved.
-
----
-
-## AI Agent Tools
-
-The LangChain agent has access to secure tool wrappers that execute the backend services:
-1. `get_account_balance`
-2. `get_transaction_history`
-3. `get_account_details`
-4. `get_beneficiaries`
-5. `create_transfer_request`
-6. `check_transaction_risk`
-7. `get_transaction_status`
-
----
-
-## Local Development & Installation
-
-### Environment Variables
-Configure a `.env` in the root:
-```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/banking_db
-JWT_SECRET=supersecretjwtkeyforbankingapplication12345!
-# Optional API Keys for LangChain Agent:
-GEMINI_API_KEY=your-gemini-key
-OPENAI_API_KEY=your-openai-key
-```
-
-### Docker Setup
-The entire stack can be launched via Docker Compose:
-```bash
-docker compose up --build
-```
-This runs three services:
-1. `postgres` (port `5432`)
-2. `backend` (FastAPI at `http://localhost:8000`)
-3. `frontend` (React Vite at `http://localhost:5173`)
-
-### Seeding Accounts
-On startup, the system automatically creates three roles:
-- **Customer**: `customer@bank.com` / `customer123` (Alice Johnson, $150k checking)
-- **Reviewer**: `reviewer@bank.com` / `reviewer123`
-- **Admin**: `admin@bank.com` / `admin123`
-
-### Testing
-To run the automated pytest suite locally:
-```bash
-cd backend
-python -m pip install -r requirements.txt
-python -m pytest
-```
+**Backend:** FastAPI, SQLAlchemy, Pydantic, PyJWT, Alembic, LangChain, PostgreSQL
+**Frontend:** React, TypeScript, Vite, Tailwind CSS, Axios, React Router
+**Infrastructure:** Render (backend + database), Vercel (frontend)
